@@ -1,0 +1,131 @@
+import requests
+from bs4 import BeautifulSoup
+import sqlite3
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import os
+
+# E-Mail aus GitHub Secrets
+EMAIL_ABSENDER = os.getenv("EMAIL_ABSENDER")
+EMAIL_PASSWORT = os.getenv("EMAIL_PASSWORT")
+EMAIL_EMPFAENGER = os.getenv("EMAIL_EMPFAENGER")
+
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+
+# Keywords & CPV-Codes
+KEYWORDS = [
+    "Marketingstrategie", "Kommunikationsstrategie", "Social Media",
+    "Online-Marketing", "Website", "Webdesign", "Grafikdesign",
+    "Employer Branding", "Kampagne", "Content-Erstellung", "SEO", "SEA"
+]
+
+CPV_CODES = [
+    "79340000", "79342000", "79341100", "79341400", "79341200",
+    "79413000", "79416000", "79822500", "72212224", "72413000"
+]
+
+PORTALE = [
+    "https://www.dtvp.de",
+    "https://www.evergabe.de",
+    "https://www.service.bund.de",
+    "https://www.evergabe-online.de",
+    "https://www.subreport.de",
+    "https://www.vergabe24.de",
+    "https://www.vergabe.nrw.de",
+    "https://www.vergabeplattform.berlin.de",
+    "https://vergabe.niedersachsen.de"
+]
+
+DB_FILE = "ausschreibungen.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS ausschreibungen (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            url TEXT UNIQUE,
+            portal TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def crawl_portal(url):
+    try:
+        r = requests.get(url, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        links = soup.find_all("a")
+        results = []
+        for link in links:
+            text = link.get_text(strip=True)
+            href = link.get("href")
+            if not href:
+                continue
+            if any(k.lower() in text.lower() for k in KEYWORDS) or any(cpv in href for cpv in CPV_CODES):
+                results.append({
+                    "title": text,
+                    "url": href if href.startswith("http") else url + href,
+                    "portal": url
+                })
+        return results
+    except Exception as e:
+        print(f"Fehler bei {url}: {e}")
+        return []
+
+def save_new_entries(results):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    new_entries = []
+    for entry in results:
+        try:
+            c.execute("INSERT INTO ausschreibungen (title, url, portal) VALUES (?, ?, ?)",
+                      (entry["title"], entry["url"], entry["portal"]))
+            conn.commit()
+            new_entries.append(entry)
+        except sqlite3.IntegrityError:
+            pass
+    conn.close()
+    return new_entries
+
+def send_email(new_entries):
+    if not new_entries:
+        print("Keine neuen Ausschreibungen.")
+        return
+
+    msg = MIMEMultipart()
+    msg["From"] = EMAIL_ABSENDER
+    msg["To"] = EMAIL_EMPFAENGER
+    msg["Subject"] = "Neue relevante Ausschreibungen"
+
+    body = "\n\n".join([f"{e['title']}\n{e['url']}" for e in new_entries])
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_ABSENDER, EMAIL_PASSWORT)
+        server.send_message(msg)
+        server.quit()
+        print("✅ E-Mail mit neuen Ausschreibungen gesendet.")
+    except Exception as e:
+        print(f"❌ Fehler beim E-Mail-Versand: {e}")
+
+def run_agent():
+    print("🔍 Suche nach Ausschreibungen...")
+    all_results = []
+    for portal in PORTALE:
+        results = crawl_portal(portal)
+        all_results.extend(results)
+
+    new_entries = save_new_entries(all_results)
+    print(f"📢 {len(new_entries)} neue Ausschreibungen gefunden.")
+    send_email(new_entries)
+
+if __name__ == "__main__":
+    init_db()
+    run_agent()
